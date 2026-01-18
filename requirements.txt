@@ -10,3 +10,4 @@ uvicorn
 pydantic
 #pandas
 
+email-validator

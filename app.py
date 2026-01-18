@@ -1,13 +1,9 @@
-from fastapi import FastAPI, HTTPException, Request, Form
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, EmailStr
+from fastapi import FastAPI, Form
+from fastapi.responses import HTMLResponse, RedirectResponse
 import sqlite3
 import hashlib
-import uvicorn
-from typing import List
 
-app = FastAPI(title="Users API")
+app = FastAPI(title="User Management Dashboard")
 
 DB = "users.db"
 
@@ -33,12 +29,7 @@ init_db()
 def hash_pw(pw: str):
     return hashlib.sha256(pw.encode()).hexdigest()
 
-# ---------- Pydantic ----------
-class User(BaseModel):
-    email: EmailStr
-    password: str
-
-# ---------- API ROUTES ----------
+# ---------- API ----------
 @app.get("/status")
 def status():
     db = get_db()
@@ -48,41 +39,41 @@ def status():
     db.close()
     return {"status": "online", "users": count}
 
-@app.get("/users", response_model=List[User])
+@app.get("/users")
 def list_users():
     db = get_db()
     c = db.cursor()
     c.execute("SELECT id, email FROM users ORDER BY id DESC")
     rows = c.fetchall()
     db.close()
-    return [{"email": r[1], "password": "********"} for r in rows]
+    return [{"id": r[0], "email": r[1]} for r in rows]
 
 @app.post("/users")
-def add_user(user: User):
+def add_user(email: str = Form(...), password: str = Form(...)):
     db = get_db()
     c = db.cursor()
     try:
         c.execute(
-            "INSERT INTO users(email,password) VALUES (?, ?)",
-            (user.email, hash_pw(user.password))
+            "INSERT INTO users(email,password) VALUES (?,?)",
+            (email, hash_pw(password))
         )
         db.commit()
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="Email already exists")
+        pass
     finally:
         db.close()
-    return {"success": True}
+    return RedirectResponse("/", status_code=303)
 
-@app.delete("/users/{user_id}")
+@app.post("/delete/{user_id}")
 def delete_user(user_id: int):
     db = get_db()
     c = db.cursor()
-    c.execute("DELETE FROM users WHERE id = ?", (user_id,))
-    c.connection.commit()
+    c.execute("DELETE FROM users WHERE id=?", (user_id,))
+    db.commit()
     db.close()
-    return {"deleted": True}
+    return RedirectResponse("/", status_code=303)
 
-# ---------- SIMPLE WEB INTERFACE ----------
+# ---------- WEB DASHBOARD ----------
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     db = get_db()
@@ -107,49 +98,33 @@ def dashboard():
     <html>
     <head>
         <title>User Dashboard</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; max-width: 800px; margin: auto; padding: 20px; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; }}
+            button {{ padding: 5px 10px; }}
+            input[type=email], input[type=password] {{ padding: 5px; margin-right: 10px; }}
+        </style>
     </head>
     <body>
         <h1>User Dashboard</h1>
-        <form method="POST" action="/add">
+        <form method="POST" action="/users">
             Email: <input type="email" name="email" required>
             Password: <input type="password" name="password" required>
             <button type="submit">Add User</button>
         </form>
-        <h2>Users</h2>
-        <table border="1" cellpadding="5">
+
+        <table>
             <tr><th>ID</th><th>Email</th><th>Action</th></tr>
             {user_rows}
         </table>
     </body>
     </html>
     """
-    return html
-
-@app.post("/add")
-def web_add(email: str = Form(...), password: str = Form(...)):
-    db = get_db()
-    c = db.cursor()
-    try:
-        c.execute(
-            "INSERT INTO users(email,password) VALUES (?, ?)",
-            (email, hash_pw(password))
-        )
-        db.commit()
-    except sqlite3.IntegrityError:
-        pass
-    finally:
-        db.close()
-    return dashboard()
-
-@app.post("/delete/{user_id}")
-def web_delete(user_id: int):
-    db = get_db()
-    c = db.cursor()
-    c.execute("DELETE FROM users WHERE id=?", (user_id,))
-    db.commit()
-    db.close()
-    return dashboard()
+    return HTMLResponse(html)
 
 # ---------- RUN LOCAL ----------
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

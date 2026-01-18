@@ -5,8 +5,8 @@
 
 fastapi
 uvicorn
-streamlit
-requests
+#streamlit
+#requests
 pydantic
-pandas
+#pandas
 

@@ -1,130 +1,155 @@
-from flask import Flask, request, jsonify, Response
-from flask_cors import CORS
+from fastapi import FastAPI, HTTPException, Request, Form
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, EmailStr
 import sqlite3
-import os
+import hashlib
+import uvicorn
+from typing import List
 
-app = Flask(__name__)
-CORS(app)
+app = FastAPI(title="Users API")
 
-DB_PATH = "users.db"
-request_count = 0
+DB = "users.db"
 
-# ---------- DB ----------
-def init_db():
-    if not os.path.exists(DB_PATH):
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("""
-        CREATE TABLE users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE
-        )
-        """)
-        cur.execute(
-            "INSERT OR IGNORE INTO users (email) VALUES (?)",
-            ("test@example.com",)
-        )
-        conn.commit()
-        conn.close()
-
+# ---------- DATABASE ----------
 def get_db():
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(DB, check_same_thread=False)
+
+def init_db():
+    db = get_db()
+    c = db.cursor()
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL
+    )
+    """)
+    db.commit()
+    db.close()
 
 init_db()
 
-# ---------- API ----------
-@app.route("/check-user", methods=["POST"])
-def check_user():
-    global request_count
-    request_count += 1
+def hash_pw(pw: str):
+    return hashlib.sha256(pw.encode()).hexdigest()
 
-    data = request.get_json(silent=True)
-    if not data or "email" not in data:
-        return jsonify({"error": "Email is required"}), 400
+# ---------- Pydantic ----------
+class User(BaseModel):
+    email: EmailStr
+    password: str
 
-    email = data["email"].strip().lower()
+# ---------- API ROUTES ----------
+@app.get("/status")
+def status():
+    db = get_db()
+    c = db.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    count = c.fetchone()[0]
+    db.close()
+    return {"status": "online", "users": count}
 
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM users WHERE email = ?", (email,))
-    user = cur.fetchone()
-    conn.close()
+@app.get("/users", response_model=List[User])
+def list_users():
+    db = get_db()
+    c = db.cursor()
+    c.execute("SELECT id, email FROM users ORDER BY id DESC")
+    rows = c.fetchall()
+    db.close()
+    return [{"email": r[1], "password": "********"} for r in rows]
 
-    return jsonify({
-        "exists": bool(user)
-    })
+@app.post("/users")
+def add_user(user: User):
+    db = get_db()
+    c = db.cursor()
+    try:
+        c.execute(
+            "INSERT INTO users(email,password) VALUES (?, ?)",
+            (user.email, hash_pw(user.password))
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=400, detail="Email already exists")
+    finally:
+        db.close()
+    return {"success": True}
 
-# ---------- DASHBOARD ----------
-@app.route("/")
+@app.delete("/users/{user_id}")
+def delete_user(user_id: int):
+    db = get_db()
+    c = db.cursor()
+    c.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    c.connection.commit()
+    db.close()
+    return {"deleted": True}
+
+# ---------- SIMPLE WEB INTERFACE ----------
+@app.get("/", response_class=HTMLResponse)
 def dashboard():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM users")
-    user_count = cur.fetchone()[0]
-    conn.close()
+    db = get_db()
+    c = db.cursor()
+    c.execute("SELECT id, email FROM users ORDER BY id DESC")
+    users = c.fetchall()
+    db.close()
+
+    user_rows = "".join(f"""
+        <tr>
+            <td>{u[0]}</td>
+            <td>{u[1]}</td>
+            <td>
+                <form method="POST" action="/delete/{u[0]}" style="display:inline;">
+                    <button type="submit">Delete</button>
+                </form>
+            </td>
+        </tr>
+    """ for u in users)
 
     html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>System Dashboard</title>
-    <style>
-        body {{
-            background: #0f172a;
-            color: #e5e7eb;
-            font-family: Arial, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-        }}
-        .card {{
-            background: #020617;
-            padding: 30px;
-            border-radius: 12px;
-            width: 320px;
-            box-shadow: 0 0 25px rgba(0,0,0,.5);
-        }}
-        h1 {{
-            margin-bottom: 20px;
-            font-size: 20px;
-        }}
-        .row {{
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 12px;
-        }}
-        .online {{
-            color: #22c55e;
-            font-weight: bold;
-        }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h1>📊 System Status</h1>
+    <html>
+    <head>
+        <title>User Dashboard</title>
+    </head>
+    <body>
+        <h1>User Dashboard</h1>
+        <form method="POST" action="/add">
+            Email: <input type="email" name="email" required>
+            Password: <input type="password" name="password" required>
+            <button type="submit">Add User</button>
+        </form>
+        <h2>Users</h2>
+        <table border="1" cellpadding="5">
+            <tr><th>ID</th><th>Email</th><th>Action</th></tr>
+            {user_rows}
+        </table>
+    </body>
+    </html>
+    """
+    return html
 
-        <div class="row">
-            <span>Server</span>
-            <span class="online">Online</span>
-        </div>
+@app.post("/add")
+def web_add(email: str = Form(...), password: str = Form(...)):
+    db = get_db()
+    c = db.cursor()
+    try:
+        c.execute(
+            "INSERT INTO users(email,password) VALUES (?, ?)",
+            (email, hash_pw(password))
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        pass
+    finally:
+        db.close()
+    return dashboard()
 
-        <div class="row">
-            <span>Total Users</span>
-            <span>{user_count}</span>
-        </div>
+@app.post("/delete/{user_id}")
+def web_delete(user_id: int):
+    db = get_db()
+    c = db.cursor()
+    c.execute("DELETE FROM users WHERE id=?", (user_id,))
+    db.commit()
+    db.close()
+    return dashboard()
 
-        <div class="row">
-            <span>API Requests</span>
-            <span>{request_count}</span>
-        </div>
-    </div>
-</body>
-</html>
-"""
-    return Response(html, mimetype="text/html")
-
-# ---------- RUN ----------
+# ---------- RUN LOCAL ----------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

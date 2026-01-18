@@ -1,0 +1,12 @@
+#flask
+#flask-cors
+#gunicorn
+
+
+fastapi
+uvicorn
+streamlit
+requests
+pydantic
+pandas
+
